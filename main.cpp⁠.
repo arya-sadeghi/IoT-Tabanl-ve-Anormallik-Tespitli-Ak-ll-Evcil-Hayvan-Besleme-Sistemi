@@ -1,0 +1,285 @@
+#include <WiFi.h>
+#include "time.h"
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+#include <ESP32Servo.h> 
+#include <HX711.h>
+#include <HTTPClient.h> 
+
+// WiFi Configuration
+const char* ssid     = "FG";
+const char* password = "asd123asd"; // Change this if you want to hide your private password
+
+// Firebase URL
+const String firebaseURL = "https://bim308-default-rtdb.firebaseio.com/"; 
+
+const int servo_ = 18;
+const int HX_DT_PIN = 25;
+const int HX_SCK_PIN = 26;
+
+// Time Zone Settings (UTC+3 for Turkey)
+const long gmtOffset_sec = 10800;
+const int daylightOffset_sec = 0;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Servo myServo; 
+HX711 scale;
+
+// Schedule Variables
+time_t sonDokulmeZamani = 0;
+const int BEKLEME_SURESI_SANIYE = 30; // 12 hours = 43200
+bool doluma_hazir = false; 
+bool kap_dolu_muydu = false;
+bool koruma_modu = false; 
+
+// Anomaly Detection Variables
+float onceki_agirlik = 0.0;
+float ogun_gecmisi[5] = {30.0, 30.0, 30.0, 30.0, 30.0}; // Default 30.0g baseline
+int ogun_sayaci = 0;
+bool anormallik_uyarisi_aktif = false;
+unsigned long uyari_baslangic_zamani = 0;
+
+// Log data to Firebase Realtime Database
+void veriTabaninaYaz(String durumMesaji, float miktar, String saatVerisi, String tarihVerisi) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = firebaseURL + "YemeAliskanligi.json"; 
+    
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    
+    String jsonVeri = "{\"Olay\":\"" + durumMesaji + "\", \"Miktar\":" + String(miktar, 0) + ", \"Saat\":\"" + saatVerisi + "\", \"Tarih\":\"" + tarihVerisi + "\"}";
+    int httpResponseCode = http.POST(jsonVeri);
+    if (httpResponseCode > 0) {
+      Serial.println("[DATABASE] Veri Firebase'e basariyla uçuruldu!");
+    } else {
+      Serial.print("[DATABASE] Baglanti Hatasi, Kod: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  lcd.init();
+  lcd.backlight();
+  lcd.print("WiFi Baglaniyor");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n[BAŞARILI] Internet Baglandi!");
+  lcd.clear();
+  lcd.print("WiFi Baglandi");
+  delay(2000);
+  
+  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org");
+  scale.begin(HX_DT_PIN, HX_SCK_PIN);
+  scale.set_scale(-205);  
+  delay(500); 
+  scale.tare(); 
+  
+  myServo.attach(servo_, 544, 2400); 
+  myServo.write(90); 
+  lcd.clear();
+  
+  struct tm timeCheck;
+  while (!getLocalTime(&timeCheck)) {
+    lcd.setCursor(0, 0);
+    lcd.print("Saat Bekleniyor.");
+    delay(500);
+  }
+  time(&sonDokulmeZamani);
+  sonDokulmeZamani = sonDokulmeZamani - BEKLEME_SURESI_SANIYE;
+  kap_dolu_muydu = true;
+  
+  char tBuffer[12];
+  snprintf(tBuffer, sizeof(tBuffer), "%02d/%02d/%04d", timeCheck.tm_mday, timeCheck.tm_mon + 1, timeCheck.tm_year + 1900);
+  String kurulusTarihi = String(tBuffer);
+  char sBuffer[9];
+  snprintf(sBuffer, sizeof(sBuffer), "%02d:%02d:%02d", timeCheck.tm_hour, timeCheck.tm_min, timeCheck.tm_sec);
+  String kurulusSaati = String(sBuffer);
+  delay(1000);
+  
+  veriTabaninaYaz("SISTEM CALISTIRILDI", 0, kurulusSaati, kurulusTarihi);
+  
+  if (scale.is_ready()) {
+    onceki_agirlik = round(scale.get_units(5));
+  }
+}
+
+void loop() {
+  struct tm timeinfo;
+  time_t simdikiZaman;
+  time(&simdikiZaman);
+  String anlikSaat = "00:00:00";
+  String anlikTarih = "00/00/0000";
+  
+  if (getLocalTime(&timeinfo)) {
+    double gecenSaniye = difftime(simdikiZaman, sonDokulmeZamani);
+    int kalanSure = BEKLEME_SURESI_SANIYE - (int)gecenSaniye;
+    if (kalanSure < 0) kalanSure = 0;
+    
+    lcd.setCursor(0, 0);
+    if (koruma_modu) {
+      lcd.printf("KILITLI %02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    } else if (!doluma_hazir) {
+      lcd.printf("Sn:%02d   %02d:%02d:%02d", kalanSure, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    } else {
+      lcd.printf("HAZIR   %02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    }
+    
+    String sh = (timeinfo.tm_hour < 10) ? "0" + String(timeinfo.tm_hour) : String(timeinfo.tm_hour);
+    String sm = (timeinfo.tm_min < 10) ? "0" + String(timeinfo.tm_min) : String(timeinfo.tm_min);
+    String ss = (timeinfo.tm_sec < 10) ? "0" + String(timeinfo.tm_sec) : String(timeinfo.tm_sec);
+    anlikSaat = sh + ":" + sm + ":" + ss;
+    char tBuffer[12];
+    snprintf(tBuffer, sizeof(tBuffer), "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+    anlikTarih = String(tBuffer);
+  }
+  
+  // Lock mechanism when out of food
+  if (koruma_modu == true) {
+    lcd.setCursor(0, 1);
+    lcd.print("MAMA BITTI/LOCK "); 
+    myServo.write(90);
+    delay(1000);
+    return; 
+  }
+  
+  if (scale.is_ready()) {
+    float agirlik = round(scale.get_units(5));
+    if (agirlik == -0.0 || agirlik < 0.0) agirlik = 0.0;
+    
+    if (!anormallik_uyarisi_aktif) {
+      lcd.setCursor(0, 1); 
+      lcd.print("Weight:        ");
+      lcd.setCursor(8, 1); 
+      lcd.print(agirlik, 0);
+      lcd.print("g ");
+    }
+    if (agirlik >= 50.0) {
+      kap_dolu_muydu = true;
+    }
+    
+    // Check if food was consumed
+    float tuketilen_miktar = onceki_agirlik - agirlik;
+    if (tuketilen_miktar > 10.0 && doluma_hazir == false) {
+      float kalori_carpani = 3.8;
+      float alinan_kalori = tuketilen_miktar * kalori_carpani;
+      Serial.println("-----------------------------------");
+      Serial.print("[BESİN TAKİBİ] Tüketilen: ");
+      Serial.print(tuketilen_miktar);
+      Serial.print("g | Alınan Kalori: ");
+      Serial.print(alinan_kalori);
+      Serial.println(" kcal");
+      Serial.println("-----------------------------------");
+      
+      // Calculate moving average of past 5 porsiyons
+      float toplam_gecmis = 0;
+      for (int i = 0; i < 5; i++) {
+        toplam_gecmis += ogun_gecmisi[i];
+      }
+      float ortalama_tuketim = toplam_gecmis / 5.0;
+      Serial.printf("[ANALİZ] Mevcut Ortalama: %.1fg | Tüketilen: %.1fg\n", ortalama_tuketim, tuketilen_miktar);
+      
+      // Anomaly Detection Rule (Deviations over 50%)
+      if (tuketilen_miktar < (0.5 * ortalama_tuketim) || tuketilen_miktar > (1.5 * ortalama_tuketim)) {
+        Serial.println("[UYARI] İştah Değişimi Tespit Edildi! (Anormallik)");
+        anormallik_uyarisi_aktif = true;
+        uyari_baslangic_zamani = millis(); 
+        veriTabaninaYaz("ANORMAL BESLENME", tuketilen_miktar, anlikSaat, anlikTarih);
+      } else {
+        veriTabaninaYaz("Normal Ogun Tuketimi", tuketilen_miktar, anlikSaat, anlikTarih);
+      }
+      ogun_gecmisi[ogun_sayaci % 5] = tuketilen_miktar;
+      ogun_sayaci++;
+    }
+    
+    if (doluma_hazir == false) {
+        onceki_agirlik = agirlik;
+    }
+    
+    // UI Warning Display
+    if (anormallik_uyarisi_aktif) {
+      if (millis() - uyari_baslangic_zamani < 15000) {
+        lcd.setCursor(0, 1);
+        lcd.print("UYARI:ISTAH DEGISI"); 
+      } else {
+        anormallik_uyarisi_aktif = false;
+      }
+    }
+    
+    double gecenSaniye = difftime(simdikiZaman, sonDokulmeZamani);
+    if (gecenSaniye >= BEKLEME_SURESI_SANIYE && doluma_hazir == false) {
+      doluma_hazir = true;
+      Serial.println("\n[SİSTEM] Bekleme süresi doldu! doluma_hazir = TRUE");
+    }
+    
+    // Trigger dispensing mechanism
+    if (agirlik < 50.0 && doluma_hazir == true && kap_dolu_muydu == true) {
+      lcd.setCursor(0, 1);
+      lcd.print("MAMA DOKULUYOR..");
+      
+      Serial.println("\n***");
+      Serial.println("[AÇILDI] 10 Saniyelik Artış Kontrolü Başladı...");
+      Serial.println("*");
+      int saniyeSayaci = 0;
+      float baslangicAgirligi = agirlik;
+      bool akis_durdu = false;
+      
+      while (agirlik < 50.0 && akis_durdu == false) {
+        myServo.write(0);
+        delay(1000);        
+        myServo.write(90);  
+        delay(250);         
+        if (scale.is_ready()) {
+          agirlik = round(scale.get_units(5));
+          if (agirlik == -0.0 || agirlik < 0.0) agirlik = 0.0;
+        }
+        lcd.setCursor(0, 1);
+        lcd.print("Weight:        ");
+        lcd.setCursor(8, 1);
+        lcd.print(agirlik, 0);
+        lcd.print("g");
+        saniyeSayaci++;
+        Serial.printf("[WHILE] Sn: %d -> Anlik: %.0fg (Baslangic: %.0fg)\n", saniyeSayaci, agirlik, baslangicAgirligi);
+        
+        if (saniyeSayaci % 10 == 0) {
+          float toplamArtis = agirlik - baslangicAgirligi;
+          if (toplamArtis < 40.0) {
+            akis_durdu = true;
+          } else {
+            baslangicAgirligi = agirlik;
+            Serial.println("[SİSTEM] Artış algılandı, motor dönmeye devam ediyor...");
+          }
+        }
+      }
+      myServo.write(90);
+      
+      // Safety lock check if container empties out
+      if (akis_durdu == true && agirlik < 50.0) {
+        koruma_modu = true;
+        Serial.println("\n[KORUMA] Mama bitti. KORUMA MODU AKTİF.");
+        veriTabaninaYaz("SISTEM KILITLENDI - MAMA BITTI", agirlik, anlikSaat, anlikTarih);
+      } 
+      else {
+        doluma_hazir = false;
+        kap_dolu_muydu = true; 
+        time(&sonDokulmeZamani); 
+        Serial.println("[KAPANDI] Başarıyla 50g limitine ulaşıldı.\n");
+        
+        lcd.setCursor(0, 1);
+        lcd.print("MAMA DOLDURULDU ");
+        delay(3000);
+        veriTabaninaYaz("Hazne Otomatik Dolduruldu", agirlik, anlikSaat, anlikTarih);
+        onceki_agirlik = agirlik; 
+      }
+    }
+  }
+  delay(1000);
+}
