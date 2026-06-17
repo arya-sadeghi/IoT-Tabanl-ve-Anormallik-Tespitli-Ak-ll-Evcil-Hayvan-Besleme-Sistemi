@@ -1,0 +1,35 @@
+# IoT-Based Smart Pet Feeder System with Anomaly Detection 🐾
+
+Developed as part of the Embedded Systems course at Istinye University (Computer Engineering Department), this project is a comprehensive Internet of Things (IoT) ecosystem. It automates pet feeding schedules and analyzes consumption data to detect sudden appetite changes or health anomalies using statistical modeling.
+
+## 🚀 Key Features
+* **Dual-Core Processing:** Utilizes the high-speed **ESP32** microcontroller, leveraging its built-in Wi-Fi and superior RAM capacity over traditional boards like the Arduino Uno.
+* **Real-Time Cloud Integration:** Wirelessly transmits log data asynchronously to the **Firebase Realtime Database**.
+* **NTP Time Synchronization:** Uses the `time.h` library to sync with NTP servers for precise UTC+3 time stamping of feeding logs.
+* **Anomaly Detection Algorithm:** Implements a 5-element **Circular Buffer** (`float ogun_gecmisi[5]`) in RAM to track a moving average of food consumption and triggers real-time alerts if consumption deviates heavily from the average.
+
+---
+
+## 🛠️ Hardware Components & Pin Mapping
+
+| Component | ESP32 Pin Connection | Function |
+| :--- | :--- | :--- |
+| **HX711 Load Cell Amplifier** | DT -> GPIO 25, SCK -> GPIO 26 | Measures bowl food weight precisely in grams |
+| **MG996R Servo Motor** | PWM -> GPIO 18 | Physically controls the food dispenser lid |
+| **16x2 I2C LCD Display** | SDA -> GPIO 21, SCL -> GPIO 19 | Displays status codes, Wi-Fi logs, weight, and countdowns |
+
+---
+
+## 🧠 Engineering Solutions & Debugging
+
+1. **I2C LCD Pin Conflict Resolved:** Initially, the LCD display failed to render characters due to the SDA line being wired to a strapping/boot pin (GPIO 12). Relocating the connection to hardware I2C pins (**GPIO 21** and **GPIO 19**) completely solved the issue.
+2. **Baud Rate Mismatch Fixed:** Garbled characters on the Serial Monitor during load cell calibration were resolved by upgrading the firmware communication speed to the industry standard **115200 baud**.
+3. **Preventing Mechanical Deadlock:** To stop the servo motor from constantly micro-triggering near the 500g threshold due to minor sensor fluctuations, a hysteresis tolerance was added, setting the lower re-trigger threshold to **450g**.
+4. **Eliminating Load Cell Signal Noise:** Structural weight fluctuations caused by environmental vibrations were fully absorbed by designing and mounting a rigid, parallel support apparatus to stabilize the load cell baseline.
+
+---
+
+## 👥 Project Team
+* **Aria Sadeghighandehari** - 2309015849
+* **Mustafa Kerem Göktürk** - 2309011120
+* **Furkan Gökbayrak** - 2309011091
