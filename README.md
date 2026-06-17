@@ -1,0 +1,1 @@
+# IoT-Tabanl-ve-Anormallik-Tespitli-Ak-ll-Evcil-Hayvan-Besleme-Sistemi
